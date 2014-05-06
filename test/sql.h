@@ -1,5 +1,5 @@
-#ifndef _SQL_H
-#define _SQL_H
+#ifndef _TEST_SQL_H
+#define _TEST_SQL_H
 
 #define DB_VERSION				3
 #define DB_VERSION_KEY			"DB_VERSION"

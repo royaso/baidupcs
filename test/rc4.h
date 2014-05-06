@@ -1,5 +1,5 @@
-#ifndef _RC4_H_
-#define _RC4_H_
+#ifndef _TEST_RC4_H_
+#define _TEST_RC4_H_
 
 #ifdef __cplusplus
 extern "C" {

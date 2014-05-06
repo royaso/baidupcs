@@ -28,8 +28,8 @@
  *
  */
 
-#ifndef _LOGGER_H
-#define _LOGGER_H
+#ifndef _TEST_LOGGER_H
+#define _TEST_LOGGER_H
 
 
 int log_open(const char *filename);

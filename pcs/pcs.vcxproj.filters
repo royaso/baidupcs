@@ -84,6 +84,9 @@
     <ClCompile Include="..\sqlite\sqlite3.c">
       <Filter>Source Files\sqlite</Filter>
     </ClCompile>
+    <ClCompile Include="..\test\utils.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="cJSON.h">
@@ -151,6 +154,9 @@
     </ClInclude>
     <ClInclude Include="openssl_md5.h">
       <Filter>Header Files\pcs</Filter>
+    </ClInclude>
+    <ClInclude Include="..\test\utils.h">
+      <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

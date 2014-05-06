@@ -19,7 +19,7 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v120</PlatformToolset>
+    <PlatformToolset>v120_xp</PlatformToolset>
     <CharacterSet>MultiByte</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
@@ -95,6 +95,7 @@
     <ClCompile Include="..\test\shell.c" />
     <ClCompile Include="..\test\shell_args.c" />
     <ClCompile Include="..\test\utf8.c" />
+    <ClCompile Include="..\test\utils.c" />
     <ClCompile Include="cJSON.c" />
     <ClCompile Include="pcs.c" />
     <ClCompile Include="pcs_fileinfo.c" />
@@ -117,6 +118,7 @@
     <ClInclude Include="..\test\shell_args.h" />
     <ClInclude Include="..\test\sql.h" />
     <ClInclude Include="..\test\utf8.h" />
+    <ClInclude Include="..\test\utils.h" />
     <ClInclude Include="cJSON.h" />
     <ClInclude Include="openssl_md5.h" />
     <ClInclude Include="pcs.h" />

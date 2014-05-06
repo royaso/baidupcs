@@ -1,5 +1,5 @@
-#ifndef _PCS_IO_H
-#define _PCS_IO_H
+#ifndef _TEST_PCS_IO_H
+#define _TEST_PCS_IO_H
 
 #include <stdio.h>
 #include <stdlib.h>

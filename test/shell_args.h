@@ -1,5 +1,5 @@
-#ifndef _SHELL_ARGS_H
-#define _SHELL_ARGS_H
+#ifndef _TEST_SHELL_ARGS_H
+#define _TEST_SHELL_ARGS_H
 
 #include "../pcs/pcs_defs.h"
 #include "../pcs/pcs.h"

@@ -1,5 +1,5 @@
-#ifndef _DIR_H_
-#define _DIR_H_
+#ifndef _TEST_DIR_H_
+#define _TEST_DIR_H_
 
 #ifdef __cplusplus
 extern "C" {

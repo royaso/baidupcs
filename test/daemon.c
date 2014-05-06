@@ -20,6 +20,7 @@
 #include "logger.h"
 #include "dir.h"
 #include "shell_args.h"
+#include "utils.h"
 
 #define APP_NAME		(config.run_in_daemon ? "pcs(svc)" : "pcs")
 
@@ -74,6 +75,7 @@ typedef struct BackupItem {
 	int		md5; /*是否启用MD5*/
 	time_t	next_run_time; /* 下次执行时间 */
 	time_t	last_run_time;
+	const char	**excludes; /*排除项*/
 	void	*state; /*附加数据*/
 } BackupItem;
 
@@ -269,10 +271,18 @@ static void freeConfig(int keepGlobal)
 	if (config.cacheFilePath) pcs_free(config.cacheFilePath);
 	if (config.logFilePath) pcs_free(config.logFilePath);
 	if (config.items) {
-		int ii;
-		for(ii = 0; ii < config.itemCount; ii++) {
-			if (config.items[ii].localPath) pcs_free(config.items[ii].localPath);
-			if (config.items[ii].remotePath) pcs_free(config.items[ii].remotePath);
+		int i;
+		const char **p, *exclude;
+		for (i = 0; i < config.itemCount; i++) {
+			if (config.items[i].localPath) pcs_free(config.items[i].localPath);
+			if (config.items[i].remotePath) pcs_free(config.items[i].remotePath);
+			if (config.items[i].excludes) {
+				p = config.items[i].excludes;
+				while ((exclude = *p++)) {
+					pcs_free((char *)exclude);
+				}
+				pcs_free((char **)config.items[i].excludes);
+			}
 		}
 		pcs_free(config.items);
 	}
@@ -377,12 +387,107 @@ static int convert_to_time_t_2(char *str)
 	return rc;
 }
 
+static int readTaskExcludes(BackupItem *task, cJSON *items)
+{
+	cJSON *item;
+	int co;
+	co = cJSON_GetArraySize(items);
+	if (co > 0) {
+		int i;
+		task->excludes = (const char **)pcs_malloc(sizeof(const char *)* (co + 1));
+		memset(task->excludes, 0, sizeof(const char *)* (co + 1));
+		for (i = 0; i < co; i++) {
+			item = cJSON_GetArrayItem(items, i);
+			task->excludes[i] = pcs_utils_strdup(item->valuestring);
+		}
+	}
+	return 0;
+}
+
+static int readTasks(cJSON *items)
+{
+	cJSON *item, *value;
+	config.itemCount = cJSON_GetArraySize(items);
+	if (config.itemCount > 0) {
+		int i;
+		config.items = (BackupItem *)pcs_malloc(sizeof(BackupItem)* config.itemCount);
+		memset(config.items, 0, sizeof(BackupItem)* config.itemCount);
+		for (i = 0; i < config.itemCount; i++) {
+			item = cJSON_GetArrayItem(items, i);
+			value = cJSON_GetObjectItem(item, "enable");
+			if (!value)
+				config.items[i].enable = 1;
+			else
+				config.items[i].enable = value->valueint;
+			value = cJSON_GetObjectItem(item, "method");
+			if (!value) {
+				if (!config.items[i].enable) continue;
+				PRINT_FATAL("No \"method\" option in items[%d] (%s)", i, config.configFilePath);
+				return -1;
+			}
+			if (strcmp(value->valuestring, "update") == 0)
+				config.items[i].method = METHOD_UPDATE;
+			else if (strcmp(value->valuestring, "backup") == 0)
+				config.items[i].method = METHOD_BACKUP;
+			else if (strcmp(value->valuestring, "restore") == 0)
+				config.items[i].method = METHOD_RESTORE;
+			else if (strcmp(value->valuestring, "reset") == 0)
+				config.items[i].method = METHOD_RESET;
+			else if (strcmp(value->valuestring, "combin") == 0)
+				config.items[i].method = METHOD_COMBIN;
+			else {
+				if (!config.items[i].enable) continue;
+				PRINT_FATAL("Wrong \"method\" option in items[%d], the method should be one of [\"update\", \"backup\", \"restore\"] (%s)", i, config.configFilePath);
+				return -1;
+			}
+			value = cJSON_GetObjectItem(item, "md5");
+			if (value) {
+				config.items[i].md5 = value->valueint;
+			}
+			value = cJSON_GetObjectItem(item, "schedule");
+			if (!value) {
+				if (!config.items[i].enable) continue;
+				PRINT_FATAL("No \"schedule\" option in items[%d] (%s)", i, config.configFilePath);
+				return -1;
+			}
+			config.items[i].schedule = convert_to_time_t(value->valuestring);
+			value = cJSON_GetObjectItem(item, "interval");
+			if (!value) {
+				if (!config.items[i].enable) continue;
+				PRINT_FATAL("No \"interval\" option in items[%d] (%s)", i, config.configFilePath);
+				return -1;
+			}
+			config.items[i].interval = convert_to_time_t_2(value->valuestring);
+			if (config.items[i].method == METHOD_RESET) continue;
+			value = cJSON_GetObjectItem(item, "localPath");
+			if (!value) {
+				PRINT_FATAL("No \"localPath\" option in items[%d] (%s)", i, config.configFilePath);
+				return -1;
+			}
+			config.items[i].localPath = pcs_utils_strdup(value->valuestring);
+			value = cJSON_GetObjectItem(item, "remotePath");
+			if (!value) {
+				PRINT_FATAL("No \"remotePath\" option in items[%d] (%s)", i, config.configFilePath);
+				return -1;
+			}
+			config.items[i].remotePath = pcs_utils_strdup(value->valuestring);
+			value = cJSON_GetObjectItem(item, "excludes");
+			if (value) {
+				if (readTaskExcludes(&config.items[i], value)) {
+					return -1;
+				}
+			}
+		}
+	}
+	return 0;
+}
+
 /*读取并解析配置文件*/
 static int readConfigFile()
 {
     long size_of_file;
 	char *content = NULL;
-	cJSON *json = NULL, *items, *item, *value;
+	cJSON *json = NULL, *items, *item;
 
 	freeConfig(TRUE);
 	size_of_file = readFileContent(config.configFilePath, &content);
@@ -426,77 +531,9 @@ static int readConfigFile()
 		cJSON_Delete(json);
 		return -1;
 	}
-	config.itemCount = cJSON_GetArraySize(items);
-	if (config.itemCount > 0) {
-		int i;
-		config.items = (BackupItem *)pcs_malloc(sizeof(BackupItem) * config.itemCount);
-		memset (config.items, 0, sizeof(BackupItem) * config.itemCount);
-		for (i = 0; i < config.itemCount; i++) {
-			item = cJSON_GetArrayItem(items, i);
-			value = cJSON_GetObjectItem(item, "enable");
-			if (!value)
-				config.items[i].enable = 1;
-			else
-				config.items[i].enable = value->valueint;
-			value = cJSON_GetObjectItem(item, "method");
-			if (!value) {
-				if (!config.items[i].enable) continue;
-				PRINT_FATAL("No \"method\" option in items[%d] (%s)", i, config.configFilePath);
-				cJSON_Delete(json);
-				return -1;
-			}
-			if (strcmp(value->valuestring, "update") == 0)
-				config.items[i].method = METHOD_UPDATE;
-			else if (strcmp(value->valuestring, "backup") == 0)
-				config.items[i].method = METHOD_BACKUP;
-			else if (strcmp(value->valuestring, "restore") == 0)
-				config.items[i].method = METHOD_RESTORE;
-			else if (strcmp(value->valuestring, "reset") == 0)
-				config.items[i].method = METHOD_RESET;
-			else if (strcmp(value->valuestring, "combin") == 0)
-				config.items[i].method = METHOD_COMBIN;
-			else {
-				if (!config.items[i].enable) continue;
-				PRINT_FATAL("Wrong \"method\" option in items[%d], the method should be one of [\"update\", \"backup\", \"restore\"] (%s)", i, config.configFilePath);
-				cJSON_Delete(json);
-				return -1;
-			}
-			value = cJSON_GetObjectItem(item, "md5");
-			if (value) {
-				config.items[i].md5 = value->valueint;
-			}
-			value = cJSON_GetObjectItem(item, "schedule");
-			if (!value) {
-				if (!config.items[i].enable) continue;
-				PRINT_FATAL("No \"schedule\" option in items[%d] (%s)", i, config.configFilePath);
-				cJSON_Delete(json);
-				return -1;
-			}
-			config.items[i].schedule = convert_to_time_t(value->valuestring);
-			value = cJSON_GetObjectItem(item, "interval");
-			if (!value) {
-				if (!config.items[i].enable) continue;
-				PRINT_FATAL("No \"interval\" option in items[%d] (%s)", i, config.configFilePath);
-				cJSON_Delete(json);
-				return -1;
-			}
-			config.items[i].interval = convert_to_time_t_2(value->valuestring);
-			if (config.items[i].method == METHOD_RESET) continue;
-			value = cJSON_GetObjectItem(item, "localPath");
-			if (!value) {
-				PRINT_FATAL("No \"localPath\" option in items[%d] (%s)", i, config.configFilePath);
-				cJSON_Delete(json);
-				return -1;
-			}
-			config.items[i].localPath = pcs_utils_strdup(value->valuestring);
-			value = cJSON_GetObjectItem(item, "remotePath");
-			if (!value) {
-				PRINT_FATAL("No \"remotePath\" option in items[%d] (%s)", i, config.configFilePath);
-				cJSON_Delete(json);
-				return -1;
-			}
-			config.items[i].remotePath = pcs_utils_strdup(value->valuestring);
-		}
+	if (readTasks(items)) {
+		cJSON_Delete(json);
+		return -1;
 	}
 	cJSON_Delete(json);
 	return 0;
@@ -1298,8 +1335,26 @@ static int quota(UInt64 *usedByteSize, UInt64 *totalByteSize)
 	return 0;
 }
 
+static int is_exclude(const char *path, const char **excludes)
+{
+	const char **p, *exclude;
+	if (!excludes) return 0;
+	p = excludes;
+	while ((exclude = *p++)) {
+#ifdef WIN32
+		if (stringmatch(exclude, path, 0))
+#else
+		if (stringmatch(exclude, path, 1))
+#endif
+		{
+			return 1;
+		}
+	}
+	return 0;
+}
+
 /* 返回直接或间接文件数量 */
-static int method_update_folder(const char *path, DbPrepare *pre, int *pFileCount, int *pDirectFileCount)
+static int method_update_folder(const char *path, DbPrepare *pre, const char **excludes, int *pFileCount, int *pDirectFileCount)
 {
 	PcsFileInfoList *list = NULL;
 	PcsFileInfoListIterater iterater;
@@ -1334,13 +1389,17 @@ static int method_update_folder(const char *path, DbPrepare *pre, int *pFileCoun
 			info = iterater.current;
 			listitem = iterater.cursor;
 			pcs_filist_remove(list, listitem, &iterater);
+			if (is_exclude(info->path, excludes)) {
+				pcs_filistitem_destroy(listitem);
+				continue;
+			}
 			if (db_add_cache(info, pre)) {
 				pcs_filistitem_destroy(listitem);
 				pcs_filist_destroy(list);
 				return -1;
 			}
 			if (info->isdir) {
-				if (method_update_folder(info->path, pre, pFileCount, NULL)) {
+				if (method_update_folder(info->path, pre, excludes, pFileCount, NULL)) {
 					pcs_filistitem_destroy(listitem);
 					pcs_filist_destroy(list);
 					return -1;
@@ -1357,7 +1416,7 @@ static int method_update_folder(const char *path, DbPrepare *pre, int *pFileCoun
 	return 0;
 }
 
-static int method_update(const char *remotePath)
+static int method_update(const char *remotePath, const char **excludes)
 {
 	DbPrepare pre = {0};
 	int fileCount = 0, directFileCount = 0;
@@ -1440,7 +1499,7 @@ static int method_update(const char *remotePath)
 			return -1;
 		}
 		//递归更新子目录
-		if (method_update_folder(remotePath, &pre, &fileCount, &directFileCount)) {
+		if (method_update_folder(remotePath, &pre, excludes, &fileCount, &directFileCount)) {
 			db_set_action(action, ACTION_STATUS_ERROR, 0);
 			pcs_free(action);
 			pcs_fileinfo_destroy(meta);
@@ -1475,6 +1534,27 @@ static char *get_remote_path(const char *localPath, const char *localBasePath, c
 		char *p = rc;
 		while (*p) {
 			if (*p == '\\') *p = '/';
+			p++;
+		}
+	}
+#endif
+	return rc;
+}
+
+static char *get_local_path(const char *remotePath, const char *localBasePath, const char *remoteBasePath)
+{
+	char *rc;
+	int len;
+
+	len = strlen(remotePath) - strlen(remoteBasePath) + strlen(localBasePath) + 2;
+	rc = (char *)pcs_malloc(len);
+	strcpy(rc, localBasePath);
+	strcat(rc, remotePath + strlen(remoteBasePath));
+#ifdef WIN32
+	{
+		char *p = rc;
+		while (*p) {
+			if (*p == '/') *p = '\\';
 			p++;
 		}
 	}
@@ -1737,7 +1817,7 @@ static int method_backup_mkdir(const char *remotePath, DbPrepare *pre, BackupSta
 }
 
 /*备份目录*/
-static int method_backup_folder(const char *localPath, const char *remotePath, DbPrepare *pre, int md5Enabled, int isForce, int isCombin, BackupState *st)
+static int method_backup_folder(const char *localPath, const char *remotePath, DbPrepare *pre, const char **excludes, int md5Enabled, int isForce, int isCombin, BackupState *st)
 {
 	my_dirent *ents = NULL,
 		*ent = NULL;
@@ -1752,9 +1832,27 @@ static int method_backup_folder(const char *localPath, const char *remotePath, D
 	}
 	ent = ents;
 	while(ent) {
+		if (is_exclude(ent->path, excludes)) {
+			if (st) {
+				if (ent->is_dir) {
+					st->skipDir++;
+					st->totalDir++;
+				}
+				else {
+					st->skipFiles++;
+					st->totalFiles++;
+				}
+				if (config.printf_enabled) {
+					printf("Process: %d        \r", st->totalDir + st->totalFiles);
+					fflush(stdout);
+				}
+			}
+			ent = ent->next;
+			continue;
+		}
 		dstPath = get_remote_path(ent->path, localPath, remotePath);
 		if (ent->is_dir) {
-			if (method_backup_folder(ent->path, dstPath, pre, md5Enabled, isForce, isCombin, st)) {
+			if (method_backup_folder(ent->path, dstPath, pre, excludes, md5Enabled, isForce, isCombin, st)) {
 				pcs_free(dstPath);
 				my_dirent_destroy(ents);
 				return -1;
@@ -1778,14 +1876,14 @@ static int method_backup_folder(const char *localPath, const char *remotePath, D
 	return 0;
 }
 
-static int method_backup_remove_files(PcsSList *slist, DbPrepare *pre, const char *remotePath)
+static int method_backup_remove_files(PcsSList *slist, DbPrepare *pre)
 {
 	PcsPanApiRes *res;
 	PcsPanApiResInfoList *info;
 	if (!slist) return 0;
 	res = pcs_delete(pcs, slist);
 	if (!res) {
-		PRINT_FATAL("Can't remove the remote file %s: %s", remotePath, pcs_strerror(pcs));
+		PRINT_FATAL("Can't remove the remote file: %s", pcs_strerror(pcs));
 		return -1;
 	}
 
@@ -1811,12 +1909,13 @@ static int method_backup_remove_files(PcsSList *slist, DbPrepare *pre, const cha
 }
 
 /*删除本地已经移除的文件或目录*/
-static int method_backup_remove_untrack(const char *remotePath, DbPrepare *pre, BackupState *st) 
+static int method_backup_remove_untrack(const char *localPath, const char *remotePath, DbPrepare *pre, const char **excludes, BackupState *st)
 {
 	int rc, is_dir;
 	sqlite3_stmt *stmt = pre->stmts[5];
 	int sz;
-	char *val;
+	char *val, *lpath;
+	const char *path;
 	PcsSList *slist = NULL, *it;
 	sz = strlen(remotePath);
 	val = (char *)pcs_malloc(sz + 3);
@@ -1846,8 +1945,27 @@ static int method_backup_remove_untrack(const char *remotePath, DbPrepare *pre, 
 			sqlite3_reset(stmt);
 			return -1;
 		}
-		it = pcs_slist_create_ex((const char *)sqlite3_column_text(stmt, 1), -1);
+		path = (const char *)sqlite3_column_text(stmt, 1);
 		is_dir = sqlite3_column_int(stmt, 7);
+		lpath = get_local_path(path, localPath, remotePath);
+		if (is_exclude(lpath, excludes)) {
+			if (st) {
+				if (is_dir) {
+					st->removeDir++;
+				}
+				else {
+					st->removeFiles++;
+				}
+				if (config.printf_enabled) {
+					printf("Process: %d        \r", st->totalDir + st->totalFiles);
+					fflush(stdout);
+				}
+			}
+			pcs_free(lpath);
+			continue;
+		}
+		pcs_free(lpath);
+		it = pcs_slist_create_ex(path, -1);
 		it->next = slist;
 		slist = it;
 		sz++;
@@ -1860,7 +1978,7 @@ static int method_backup_remove_untrack(const char *remotePath, DbPrepare *pre, 
 			}
 		}
 		if (sz >= 10) {
-			if (method_backup_remove_files(slist, pre, remotePath)) {
+			if (method_backup_remove_files(slist, pre)) {
 				pcs_free(val);
 				pcs_slist_destroy(slist);
 				sqlite3_reset(stmt);
@@ -1876,7 +1994,7 @@ static int method_backup_remove_untrack(const char *remotePath, DbPrepare *pre, 
 		}
 	}
 	if (slist) {
-		if (method_backup_remove_files(slist, pre, remotePath)) {
+		if (method_backup_remove_files(slist, pre)) {
 			pcs_free(val);
 			pcs_slist_destroy(slist);
 			sqlite3_reset(stmt);
@@ -1889,7 +2007,7 @@ static int method_backup_remove_untrack(const char *remotePath, DbPrepare *pre, 
 	return 0;
 }
 
-int method_backup(const char *localPath, const char *remotePath, int md5Enabled, int isForce, int isCombin)
+int method_backup(const char *localPath, const char *remotePath, const char **excludes, int md5Enabled, int isForce, int isCombin)
 {
 	ActionInfo ai = {0};
 	DbPrepare pre = {0};
@@ -1956,7 +2074,7 @@ int method_backup(const char *localPath, const char *remotePath, int md5Enabled,
 	}
 	if (!ai.rowid || ai.status != ACTION_STATUS_FINISHED) {
 		PRINT_NOTICE("Update local cache for %s", remotePath);
-		if (method_update(remotePath)) {
+		if (method_update(remotePath, NULL)) {
 			PRINT_FATAL("Can't update local cache for %s", remotePath);
 			db_set_action(action, ACTION_STATUS_ERROR, 0);
 			pcs_free(updateAction);
@@ -2003,7 +2121,7 @@ int method_backup(const char *localPath, const char *remotePath, int md5Enabled,
 		return -1;
 	}
 	if (rc == 2) { //类型为目录
-		if (method_backup_folder(localPath, remotePath, &pre, md5Enabled, isForce, isCombin, &st)) {
+		if (method_backup_folder(localPath, remotePath, &pre, excludes, md5Enabled, isForce, isCombin, &st)) {
 			db_set_action(action, ACTION_STATUS_ERROR, 0);
 			pcs_free(action);
 			my_dirent_destroy(ent);
@@ -2033,7 +2151,7 @@ int method_backup(const char *localPath, const char *remotePath, int md5Enabled,
 	}
 	my_dirent_destroy(ent);
 	//移除服务器中，本地不存在的文件
-	if (!isCombin && method_backup_remove_untrack(remotePath, &pre, &st)) {
+	if (!isCombin && method_backup_remove_untrack(localPath, remotePath, &pre, excludes, &st)) {
 		//PRINT_FATAL("Can't remove untrack files from the server: %s", remotePath);
 		db_set_action(action, ACTION_STATUS_ERROR, 0);
 		pcs_free(action);
@@ -2156,27 +2274,6 @@ static int method_restore_file(const char *localPath, PcsFileInfo *remote, DbPre
 	return 0;
 }
 
-static char *get_local_path(const char *remotePath, const char *localBasePath, const char *remoteBasePath)
-{
-	char *rc;
-	int len;
-
-	len = strlen(remotePath) - strlen(remoteBasePath) + strlen(localBasePath) + 2;
-	rc = (char *)pcs_malloc(len);
-	strcpy(rc, localBasePath);
-	strcat(rc, remotePath + strlen(remoteBasePath));
-#ifdef WIN32
-	{
-		char *p = rc;
-		while (*p) {
-			if (*p == '/') *p = '\\';
-			p++;
-		}
-	}
-#endif
-	return rc;
-}
-
 static void mkdirs(const char *dir)
 {
 	char *tmp;
@@ -2209,7 +2306,7 @@ static void mkdirs(const char *dir)
 	mkdirs(p + 1);
 }
 
-static int method_restore_folder(const char *localPath, const char *remotePath, DbPrepare *pre, int md5Enabled, int isForce, int isCombin, BackupState *st)
+static int method_restore_folder(const char *localPath, const char *remotePath, DbPrepare *pre, const char **excludes, int md5Enabled, int isForce, int isCombin, BackupState *st)
 {
 	int rc;
 	sqlite3_stmt *stmt;
@@ -2251,6 +2348,24 @@ static int method_restore_folder(const char *localPath, const char *remotePath, 
 		}
 		freeCacheInfo(&ri);
 		db_fill_cache(&ri, stmt);
+		if (is_exclude(ri.path, excludes)) {
+			if (st) {
+				if (ri.isdir) {
+					st->skipDir++;
+					st->totalDir++;
+				}
+				else {
+					st->skipFiles++;
+					st->totalFiles++;
+				}
+				if (config.printf_enabled) {
+					printf("Process: %d        \r", st->totalDir + st->totalFiles);
+					fflush(stdout);
+				}
+			}
+			freeCacheInfo(&ri);
+			continue;
+		}
 		dstPath = get_local_path(ri.path, localPath, remotePath);
 		if (ri.isdir) {
 			//if (method_restore_folder(dstPath, ri.path, pre, md5Enabled, st)) {
@@ -2290,7 +2405,7 @@ static int method_restore_folder(const char *localPath, const char *remotePath, 
 	return 0;
 }
 
-static int method_restore_remove_untrack(my_dirent *local, const char *remotePath, DbPrepare *pre, BackupState *st)
+static int method_restore_remove_untrack(my_dirent *local, const char *remotePath, DbPrepare *pre, const char **excludes, BackupState *st)
 {
 	my_dirent *ents = NULL,
 		*ent = NULL;
@@ -2318,7 +2433,19 @@ static int method_restore_remove_untrack(my_dirent *local, const char *remotePat
 			ent = ents;
 			while(ent) {
 				dstPath = get_remote_path(ent->path, local->path, remotePath);
-				if (method_restore_remove_untrack(ent, dstPath, pre, st)) {
+				if (is_exclude(dstPath, excludes)) {
+					if (st) {
+						st->removeFiles++;
+						if (config.printf_enabled) {
+							printf("Process: %d        \r", st->totalDir + st->totalFiles);
+							fflush(stdout);
+						}
+					}
+					pcs_free(dstPath);
+					ent = ent->next;
+					continue;
+				}
+				if (method_restore_remove_untrack(ent, dstPath, pre, excludes, st)) {
 					pcs_free(dstPath);
 					my_dirent_destroy(ents);
 					freeCacheInfo(&cache);
@@ -2338,7 +2465,7 @@ static int method_restore_remove_untrack(my_dirent *local, const char *remotePat
 	return 0;
 }
 
-static int method_restore(const char *localPath, const char *remotePath, int md5Enabled, int isForce, int isCombin)
+static int method_restore(const char *localPath, const char *remotePath, const char **excludes, int md5Enabled, int isForce, int isCombin)
 {
 	ActionInfo ai = {0};
 	DbPrepare pre = {0};
@@ -2401,7 +2528,7 @@ static int method_restore(const char *localPath, const char *remotePath, int md5
 	}
 	if (!ai.rowid || ai.status != ACTION_STATUS_FINISHED) {
 		PRINT_NOTICE("Update local cache for %s", remotePath);
-		if (method_update(remotePath)) {
+		if (method_update(remotePath, NULL)) {
 			PRINT_FATAL("Can't update local cache for %s", remotePath);
 			db_set_action(action, ACTION_STATUS_ERROR, 0);
 			pcs_free(updateAction);
@@ -2431,7 +2558,7 @@ static int method_restore(const char *localPath, const char *remotePath, int md5
 	}
 	pcs_setopt(pcs, PCS_OPTION_DOWNLOAD_WRITE_FUNCTION, &method_restore_write);
 	if (rf.isdir) { //类型为目录
-		if (method_restore_folder(localPath, remotePath, &pre, md5Enabled, isForce, isCombin, &st)) {
+		if (method_restore_folder(localPath, remotePath, &pre, excludes, md5Enabled, isForce, isCombin, &st)) {
 			pcs_setopt(pcs, PCS_OPTION_DOWNLOAD_WRITE_FUNCTION, NULL);
 			db_set_action(action, ACTION_STATUS_ERROR, 0);
 			pcs_free(action);
@@ -2459,7 +2586,7 @@ static int method_restore(const char *localPath, const char *remotePath, int md5
 		my_dirent *local;
 		get_file_ent(&local, localPath);
 		if (local) {
-			if (method_restore_remove_untrack(local, remotePath, &pre, &st)) {
+			if (method_restore_remove_untrack(local, remotePath, &pre, excludes, &st)) {
 				//PRINT_FATAL("Can't remove untrack files: %s", localPath);
 				db_set_action(action, ACTION_STATUS_ERROR, 0);
 				pcs_free(action);
@@ -2483,9 +2610,9 @@ static int method_restore(const char *localPath, const char *remotePath, int md5
 static int method_combin(const char *localPath, const char *remotePath, int md5Enabled)
 {
 	int rc;
-	rc = method_backup(localPath, remotePath, md5Enabled, 0, 1);
+	rc = method_backup(localPath, remotePath, NULL, md5Enabled, 0, 1);
 	if (!rc) {
-		rc = method_restore(localPath, remotePath, md5Enabled, 0, 1);
+		rc = method_restore(localPath, remotePath, NULL, md5Enabled, 0, 1);
 	}
 	return rc;
 }
@@ -2893,7 +3020,7 @@ static int method_compare(const char *localPath, const char *remotePath, int md5
 	}
 	if (!ai.rowid || ai.status != ACTION_STATUS_FINISHED) {
 		PRINT_NOTICE("Update local cache for %s", remotePath);
-		if (method_update(remotePath)) {
+		if (method_update(remotePath, NULL)) {
 			PRINT_FATAL("Can't update local cache for %s", remotePath);
 			db_set_action(action, ACTION_STATUS_ERROR, 0);
 			pcs_free(updateAction);
@@ -3265,24 +3392,24 @@ static int task(int itemIndex)
 	switch (config.items[itemIndex].method)
 	{
 	case METHOD_UPDATE:
-		rc = method_update(config.items[itemIndex].remotePath);
+		rc = method_update(config.items[itemIndex].remotePath, config.items[itemIndex].excludes);
 		if (rc) {
 			PRINT_NOTICE("Retry");
-			rc = method_update(config.items[itemIndex].remotePath);
+			rc = method_update(config.items[itemIndex].remotePath, config.items[itemIndex].excludes);
 		}
 		break;
 	case METHOD_BACKUP:
-		rc = method_backup(config.items[itemIndex].localPath, config.items[itemIndex].remotePath, config.items[itemIndex].md5, 0, 0);
+		rc = method_backup(config.items[itemIndex].localPath, config.items[itemIndex].remotePath, config.items[itemIndex].excludes, config.items[itemIndex].md5, 0, 0);
 		if (rc) {
 			PRINT_NOTICE("Retry");
-			rc = method_backup(config.items[itemIndex].localPath, config.items[itemIndex].remotePath, config.items[itemIndex].md5, 0, 0);
+			rc = method_backup(config.items[itemIndex].localPath, config.items[itemIndex].remotePath, config.items[itemIndex].excludes, config.items[itemIndex].md5, 0, 0);
 		}
 		break;
 	case METHOD_RESTORE:
-		rc = method_restore(config.items[itemIndex].localPath, config.items[itemIndex].remotePath, config.items[itemIndex].md5, 0, 0);
+		rc = method_restore(config.items[itemIndex].localPath, config.items[itemIndex].remotePath, config.items[itemIndex].excludes, config.items[itemIndex].md5, 0, 0);
 		if (rc) {
 			PRINT_NOTICE("Retry");
-			rc = method_restore(config.items[itemIndex].localPath, config.items[itemIndex].remotePath, config.items[itemIndex].md5, 0, 0);
+			rc = method_restore(config.items[itemIndex].localPath, config.items[itemIndex].remotePath, config.items[itemIndex].excludes, config.items[itemIndex].md5, 0, 0);
 		}
 		break;
 	case METHOD_RESET:
@@ -3479,13 +3606,13 @@ static int run_shell(struct params *params)
 	PRINT_NOTICE("UID: %s", pcs_sysUID(pcs));
 	switch (params->action){
 	case ACTION_UPDATE:
-		rc = method_update(params->args[0]);
+		rc = method_update(params->args[0], NULL);
 		break;
 	case ACTION_BACKUP:
-		rc = method_backup(params->args[0], params->args[1], params->md5, params->is_force, 0);
+		rc = method_backup(params->args[0], params->args[1], NULL, params->md5, params->is_force, 0);
 		break;
 	case ACTION_RESTORE:
-		rc = method_restore(params->args[0], params->args[1], params->md5, params->is_force, 0);
+		rc = method_restore(params->args[0], params->args[1], NULL, params->md5, params->is_force, 0);
 		break;
 	case ACTION_COMBIN:
 		rc = method_combin(params->args[0], params->args[1], params->md5);
