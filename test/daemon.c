@@ -395,7 +395,7 @@ static int readTaskExcludes(BackupItem *task, cJSON *items)
 	if (co > 0) {
 		int i;
 		task->excludes = (const char **)pcs_malloc(sizeof(const char *)* (co + 1));
-		memset(task->excludes, 0, sizeof(const char *)* (co + 1));
+		memset((char **)task->excludes, 0, sizeof(const char *)* (co + 1));
 		for (i = 0; i < co; i++) {
 			item = cJSON_GetArrayItem(items, i);
 			task->excludes[i] = pcs_utils_strdup(item->valuestring);
@@ -1342,9 +1342,9 @@ static int is_exclude(const char *path, const char **excludes)
 	p = excludes;
 	while ((exclude = *p++)) {
 #ifdef WIN32
-		if (stringmatch(exclude, path, 0))
-#else
 		if (stringmatch(exclude, path, 1))
+#else
+		if (stringmatch(exclude, path, 0))
 #endif
 		{
 			return 1;
@@ -1354,7 +1354,7 @@ static int is_exclude(const char *path, const char **excludes)
 }
 
 /* 返回直接或间接文件数量 */
-static int method_update_folder(const char *path, DbPrepare *pre, const char **excludes, int *pFileCount, int *pDirectFileCount)
+static int method_update_folder(const char *path, DbPrepare *pre, int *pFileCount, int *pDirectFileCount)
 {
 	PcsFileInfoList *list = NULL;
 	PcsFileInfoListIterater iterater;
@@ -1389,17 +1389,13 @@ static int method_update_folder(const char *path, DbPrepare *pre, const char **e
 			info = iterater.current;
 			listitem = iterater.cursor;
 			pcs_filist_remove(list, listitem, &iterater);
-			if (is_exclude(info->path, excludes)) {
-				pcs_filistitem_destroy(listitem);
-				continue;
-			}
 			if (db_add_cache(info, pre)) {
 				pcs_filistitem_destroy(listitem);
 				pcs_filist_destroy(list);
 				return -1;
 			}
 			if (info->isdir) {
-				if (method_update_folder(info->path, pre, excludes, pFileCount, NULL)) {
+				if (method_update_folder(info->path, pre, pFileCount, NULL)) {
 					pcs_filistitem_destroy(listitem);
 					pcs_filist_destroy(list);
 					return -1;
@@ -1416,7 +1412,7 @@ static int method_update_folder(const char *path, DbPrepare *pre, const char **e
 	return 0;
 }
 
-static int method_update(const char *remotePath, const char **excludes)
+static int method_update(const char *remotePath)
 {
 	DbPrepare pre = {0};
 	int fileCount = 0, directFileCount = 0;
@@ -1499,7 +1495,7 @@ static int method_update(const char *remotePath, const char **excludes)
 			return -1;
 		}
 		//递归更新子目录
-		if (method_update_folder(remotePath, &pre, excludes, &fileCount, &directFileCount)) {
+		if (method_update_folder(remotePath, &pre, &fileCount, &directFileCount)) {
 			db_set_action(action, ACTION_STATUS_ERROR, 0);
 			pcs_free(action);
 			pcs_fileinfo_destroy(meta);
@@ -1949,18 +1945,6 @@ static int method_backup_remove_untrack(const char *localPath, const char *remot
 		is_dir = sqlite3_column_int(stmt, 7);
 		lpath = get_local_path(path, localPath, remotePath);
 		if (is_exclude(lpath, excludes)) {
-			if (st) {
-				if (is_dir) {
-					st->removeDir++;
-				}
-				else {
-					st->removeFiles++;
-				}
-				if (config.printf_enabled) {
-					printf("Process: %d        \r", st->totalDir + st->totalFiles);
-					fflush(stdout);
-				}
-			}
 			pcs_free(lpath);
 			continue;
 		}
@@ -2074,7 +2058,7 @@ int method_backup(const char *localPath, const char *remotePath, const char **ex
 	}
 	if (!ai.rowid || ai.status != ACTION_STATUS_FINISHED) {
 		PRINT_NOTICE("Update local cache for %s", remotePath);
-		if (method_update(remotePath, NULL)) {
+		if (method_update(remotePath)) {
 			PRINT_FATAL("Can't update local cache for %s", remotePath);
 			db_set_action(action, ACTION_STATUS_ERROR, 0);
 			pcs_free(updateAction);
@@ -2528,7 +2512,7 @@ static int method_restore(const char *localPath, const char *remotePath, const c
 	}
 	if (!ai.rowid || ai.status != ACTION_STATUS_FINISHED) {
 		PRINT_NOTICE("Update local cache for %s", remotePath);
-		if (method_update(remotePath, NULL)) {
+		if (method_update(remotePath)) {
 			PRINT_FATAL("Can't update local cache for %s", remotePath);
 			db_set_action(action, ACTION_STATUS_ERROR, 0);
 			pcs_free(updateAction);
@@ -3020,7 +3004,7 @@ static int method_compare(const char *localPath, const char *remotePath, int md5
 	}
 	if (!ai.rowid || ai.status != ACTION_STATUS_FINISHED) {
 		PRINT_NOTICE("Update local cache for %s", remotePath);
-		if (method_update(remotePath, NULL)) {
+		if (method_update(remotePath)) {
 			PRINT_FATAL("Can't update local cache for %s", remotePath);
 			db_set_action(action, ACTION_STATUS_ERROR, 0);
 			pcs_free(updateAction);
@@ -3392,10 +3376,10 @@ static int task(int itemIndex)
 	switch (config.items[itemIndex].method)
 	{
 	case METHOD_UPDATE:
-		rc = method_update(config.items[itemIndex].remotePath, config.items[itemIndex].excludes);
+		rc = method_update(config.items[itemIndex].remotePath);
 		if (rc) {
 			PRINT_NOTICE("Retry");
-			rc = method_update(config.items[itemIndex].remotePath, config.items[itemIndex].excludes);
+			rc = method_update(config.items[itemIndex].remotePath);
 		}
 		break;
 	case METHOD_BACKUP:
@@ -3606,7 +3590,7 @@ static int run_shell(struct params *params)
 	PRINT_NOTICE("UID: %s", pcs_sysUID(pcs));
 	switch (params->action){
 	case ACTION_UPDATE:
-		rc = method_update(params->args[0], NULL);
+		rc = method_update(params->args[0]);
 		break;
 	case ACTION_BACKUP:
 		rc = method_backup(params->args[0], params->args[1], NULL, params->md5, params->is_force, 0);

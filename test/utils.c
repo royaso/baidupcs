@@ -97,12 +97,12 @@ int stringmatchlen(const char *pattern, int patternLen,
 			stringLen--;
 			break;
 		}
-		case '\\':
-			if (patternLen >= 2) {
-				pattern++;
-				patternLen--;
-			}
-			/** fall through */
+		//case '\\':
+		//	if (patternLen >= 2) {
+		//		pattern++;
+		//		patternLen--;
+		//	}
+		//	/** fall through */
 		default:
 			if (!nocase) {
 				if (pattern[0] != string[0])
